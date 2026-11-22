@@ -1,4 +1,4 @@
-"""Aggregate all per-seed metric JSONs into data/metrics/summary.csv."""
+"""Aggregate all per-seed metric JSONs into results/metrics/summary.csv."""
 
 import csv
 import json

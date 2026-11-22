@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Aggregate all per-seed metric JSONs into data/metrics/summary.csv.
+# Aggregate all per-seed metric JSONs into results/metrics/summary.csv.
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PY="${ROOT}/.venv/bin/python"; [ -x "${PY}" ] || PY=python3

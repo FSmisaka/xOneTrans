@@ -1,5 +1,6 @@
 """Shared training/evaluation entry point for all diagnostic experiments."""
 
+import contextlib
 import copy
 import json
 import os
@@ -73,6 +74,8 @@ class MaskedOneTrans(nn.Module):
 
 @torch.no_grad()
 def evaluate(model, loader, device) -> Dict[str, np.ndarray]:
+    if hasattr(model, "module"):
+        model = model.module  # bypass the DDP wrapper: eval forward must not touch the reducer
     model.eval()
     preds, labels = [], []
     for batch in loader:
@@ -87,9 +90,11 @@ def train_model(model, datasets, seed, experiment, logger, device, ddp=False, ep
                 accum_steps: int = 1, eval_batch_size: int = None):
     cfg = MODEL_CFG
     n_epochs = epochs or cfg["epochs"]
-    micro_batch = max(1, cfg["batch_size"] // accum_steps)
-    if logger is not None and accum_steps > 1:
-        logger.info(f"gradient accumulation: micro_batch={micro_batch} x {accum_steps}")
+    world_size = torch.distributed.get_world_size() if ddp else 1
+    micro_batch = max(1, cfg["batch_size"] // (accum_steps * world_size))
+    if logger is not None and (accum_steps > 1 or world_size > 1):
+        logger.info(f"effective batch={cfg['batch_size']}: micro_batch={micro_batch} x "
+                    f"{accum_steps} accumulation x {world_size} ranks")
     train_sampler = None
     shuffle = True
     if ddp:
@@ -100,9 +105,9 @@ def train_model(model, datasets, seed, experiment, logger, device, ddp=False, ep
                               num_workers=cfg["num_workers"], drop_last=False)
     valid_loader = DataLoader(datasets["valid"], batch_size=eval_batch_size or cfg["eval_batch_size"],
                               shuffle=False, collate_fn=collate_batch, num_workers=cfg["num_workers"])
-    optimizer = torch.optim.Adam(model.param_groups(cfg["dense_learning_rate"],
-                                                    cfg["sparse_learning_rate"]),
-                                 weight_decay=cfg["weight_decay"])
+    optimizer = torch.optim.Adam((model.module if ddp else model).param_groups(
+        cfg["dense_learning_rate"], cfg["sparse_learning_rate"]),
+        weight_decay=cfg["weight_decay"])
     amp_dtype = {"none": None, "bf16": torch.bfloat16}.get(cfg["amp_dtype"])
     best_auc, best_state, best_epoch = -1.0, None, -1
     patience_left = cfg["early_stop_patience"]
@@ -116,15 +121,18 @@ def train_model(model, datasets, seed, experiment, logger, device, ddp=False, ep
         optimizer.zero_grad(set_to_none=True)
         for step, batch in enumerate(train_loader):
             batch = {k: v.to(device) for k, v in batch.items()}
-            if amp_dtype is not None:
-                with torch.autocast(device_type=device.type, dtype=amp_dtype):
+            is_boundary = (step + 1) % accum_steps == 0
+            sync_ctx = (contextlib.nullcontext() if (is_boundary or not ddp) else model.no_sync())
+            with sync_ctx:
+                if amp_dtype is not None:
+                    with torch.autocast(device_type=device.type, dtype=amp_dtype):
+                        out = model(batch)
+                        loss = F.binary_cross_entropy_with_logits(out["logit"].float(), batch["label"])
+                else:
                     out = model(batch)
-                    loss = F.binary_cross_entropy_with_logits(out["logit"].float(), batch["label"])
-            else:
-                out = model(batch)
-                loss = F.binary_cross_entropy_with_logits(out["logit"], batch["label"])
-            (loss / accum_steps).backward()
-            if (step + 1) % accum_steps == 0:
+                    loss = F.binary_cross_entropy_with_logits(out["logit"], batch["label"])
+                (loss / accum_steps).backward()
+            if is_boundary:
                 optimizer.step()
                 optimizer.zero_grad(set_to_none=True)
             last_loss = loss.item()
@@ -187,8 +195,12 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
     ddp = int(os.environ.get("WORLD_SIZE", "1")) > 1
     rank = int(os.environ.get("RANK", "0"))
     if ddp:
-        torch.distributed.init_process_group("nccl")
-        device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        torch.distributed.init_process_group(backend)
+        if torch.cuda.is_available():
+            device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+        else:
+            device = torch.device("cpu")
     else:
         device = resolve_device(device_arg)
     logger = setup_logger(f"{experiment}_{seed}", PATHS["logs_root"] / experiment / f"{seed}.log") if rank == 0 else None
@@ -213,7 +225,16 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
     field_mask = build_field_mask(enabled_fields).to(device) if enabled_fields is not None else None
     model = MaskedOneTrans(base, field_mask)
     if ddp:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index])
+        # The reference OneTrans discards the last layer's sequence-FFN output
+        # (the block returns only NS tokens), so those params never receive
+        # grads -- identical to single-process behavior, but DDP needs
+        # find_unused_parameters to tolerate them.
+        if torch.cuda.is_available():
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, device_ids=[device.index], find_unused_parameters=True)
+        else:
+            model = torch.nn.parallel.DistributedDataParallel(
+                model, find_unused_parameters=True)
     accum_steps = accum_steps_for(max_len, MODEL_CFG["batch_size"], device)
     eval_bs = max(256, MODEL_CFG["eval_batch_size"] * MODEL_CFG["max_history_len"] // max_len)
     model, train_info = train_model(model, datasets, seed, experiment, logger, device, ddp=ddp,
@@ -286,7 +307,8 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
             "sample_counts": {s: len(d) for s, d in datasets.items()},
             "diagnostic_samples": int(len(diag_idx)),
             "ner_tokens": int(len(rank_arr)),
-            "training": {**train_info, "accum_steps": accum_steps, "micro_batch_size": max(1, MODEL_CFG["batch_size"] // accum_steps)},
+            "training": {**train_info, "accum_steps": accum_steps, "world_size": int(os.environ.get("WORLD_SIZE", "1")),
+                        "effective_batch_size": MODEL_CFG["batch_size"]},
             "ner": ner,
             **probe_metrics,
             **full_metrics,
