@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import numpy as np
+import torch
 
 import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -22,7 +23,7 @@ from config.exp_1_4_length import CONFIG as EXP_1_4
 from src.data.permutation import build_quality_maps, load_quality_maps
 from src.data.dataset import QualityTransform
 from src.experiments import figures
-from src.experiments.runner import get_data, run_condition
+from src.experiments.runner import dist_rank, get_data, run_condition
 from src.experiments.static_probe import run_static_probe
 
 
@@ -37,8 +38,12 @@ def conditions_1_1():
 
 def conditions_1_2(dataset_key):
     data = get_data(dataset_key)
-    probe_result = run_static_probe(data, dataset_key)
-    build_quality_maps(dataset_key, EXP_1_2["quality_levels"], EXP_1_2["permutation_seed"])
+    probe_result = None
+    if dist_rank() == 0:
+        probe_result = run_static_probe(data, dataset_key)
+        build_quality_maps(dataset_key, EXP_1_2["quality_levels"], EXP_1_2["permutation_seed"])
+    if torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1:
+        torch.distributed.barrier()  # maps/probe cache must exist before other ranks load them
     conds = []
     for q in EXP_1_2["quality_levels"]:
         transform = None if q >= 1.0 else QualityTransform(load_quality_maps(dataset_key, q), data.tables)
@@ -90,7 +95,8 @@ def aggregate(all_metrics, conds):
     return summary
 
 
-def run_experiment(exp: str, dataset_key: str, seeds, device_arg: str, debug: bool = False):
+def run_experiment(exp: str, dataset_key: str, seeds, device_arg: str, debug: bool = False,
+                   skip_existing: bool = False):
     exp_id = {"1_1": "exp_1_1_count", "1_2": "exp_1_2_quality",
               "1_3": "exp_1_3_type", "1_4": "exp_1_4_length"}[exp]
     probe_result = None
@@ -104,7 +110,7 @@ def run_experiment(exp: str, dataset_key: str, seeds, device_arg: str, debug: bo
         conds = conditions_1_3()
 
     all_metrics = []
-    if exp == "1_1":
+    if exp == "1_1" and dist_rank() == 0:
         meta_fp = PATHS["metadata_root"] / "field_order.json"
         meta_fp.parent.mkdir(parents=True, exist_ok=True)
         meta_fp.write_text(json.dumps({
@@ -119,11 +125,14 @@ def run_experiment(exp: str, dataset_key: str, seeds, device_arg: str, debug: bo
                                     transform=kwargs.get("transform"),
                                     max_history_len=kwargs.get("max_history_len"),
                                     min_history=kwargs.get("min_history"),
-                                    device_arg=device_arg, debug=debug)
+                                    device_arg=device_arg, debug=debug,
+                                    skip_existing=skip_existing)
             if metrics is not None:
                 metrics["variable"] = kwargs["variable"]
                 all_metrics.append(metrics)
 
+    if dist_rank() != 0:
+        return
     summary = aggregate(all_metrics, conds)
     out = {"experiment": exp_id, "dataset": dataset_key, "seeds": list(seeds),
            "conditions": [c for c, _ in conds], "summary": summary}
@@ -165,12 +174,15 @@ def main():
     parser.add_argument("--seeds", nargs="+", type=int, default=None)
     parser.add_argument("--device", default="auto")
     parser.add_argument("--debug", action="store_true")
+    parser.add_argument("--skip-existing", action="store_true",
+                        help="skip (experiment, condition, seed) runs whose metrics JSON already exists")
     args = parser.parse_args()
     if args.exp == "1_4" and not EXP_1_4["enabled"]:
         print("exp 1_4 is disabled in config/exp_1_4_length.py (enabled=False); nothing to do")
         return
     seeds = args.seeds or MODEL_CFG["seeds"]
-    run_experiment(args.exp, args.dataset, seeds, args.device, debug=args.debug)
+    run_experiment(args.exp, args.dataset, seeds, args.device, debug=args.debug,
+                   skip_existing=args.skip_existing)
 
 
 if __name__ == "__main__":

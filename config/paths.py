@@ -16,8 +16,10 @@ CONFIG: Dict[str, Any] = {
     "metrics_root": PROJECT_ROOT / "results" / "metrics",
     "figures_root": PROJECT_ROOT / "results" / "figures",
     "raw_dataset_dirs": {
-        "1k": Path("/Users/york/Documents/GitHub/hand-roll/data/raw_data/KuaiRand-1K"),
-        "27k": Path("/Users/york/Documents/GitHub/hand-roll/data/raw_data/KuaiRand-27K"),
+        "1k": Path("./data/raw/KuaiRand-1K"),
+        "27k": Path("./data/raw/KuaiRand-27K"),
+        # "1k": Path("/Users/york/Documents/GitHub/hand-roll/data/raw_data/KuaiRand-1K"),
+        # "27k": Path("/Users/york/Documents/GitHub/hand-roll/data/raw_data/KuaiRand-27K"),
     },
     "processed_dataset_dirs": {
         "1k": PROJECT_ROOT / "data" / "processed" / "KuaiRand-1K",
@@ -32,3 +34,4 @@ CONFIG: Dict[str, Any] = {
         "local_impl_version": "1.0.0",
     },
 }
+

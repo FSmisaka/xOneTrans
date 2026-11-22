@@ -5,7 +5,11 @@ OneTrans 序列表示退化诊断实验（问题发现阶段，实验 1.1–1.4�
 ## 环境安装
 
 ```bash
-python3 -m venv .venv && .venv/bin/pip install -r requirements.txt  # 安装依赖（torch、pandas、pyarrow、scikit-learn、matplotlib）
+source /thuir/wangyiyao/miniconda3/etc/profile.d/conda.sh
+conda activate /thuir/wangyiyao/conda_envs/r4gr
+python3 -m venv .venv
+.venv/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple -r requirements.txt  
+# 安装依赖（torch、pandas、pyarrow、scikit-learn、matplotlib）
 ```
 
 ## 数据准备

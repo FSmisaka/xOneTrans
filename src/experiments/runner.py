@@ -188,15 +188,49 @@ def peak_memory_mb(device) -> float:
     return 0.0
 
 
+_DIST_READY = False
+
+
+def dist_rank() -> int:
+    return torch.distributed.get_rank() if torch.distributed.is_initialized() else 0
+
+
+def ensure_dist():
+    """Initialize the default process group once per torchrun session.
+    Re-initializing after destroy_process_group() breaks NCCL bootstrap
+    sockets, so the group is never torn down between conditions."""
+    global _DIST_READY
+    if _DIST_READY:
+        return
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+    if world_size > 1:
+        n_visible = torch.cuda.device_count()
+        if torch.cuda.is_available() and world_size > n_visible:
+            raise RuntimeError(
+                f"torchrun started {world_size} ranks but only {n_visible} CUDA devices are "
+                f"visible (CUDA_VISIBLE_DEVICES). Use --nproc_per_node <= visible GPUs, "
+                f"one rank per GPU."
+            )
+        backend = "nccl" if torch.cuda.is_available() else "gloo"
+        torch.distributed.init_process_group(backend)
+    _DIST_READY = True
+
+
 def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
                   enabled_fields=None, transform: Optional[QualityTransform] = None,
                   max_history_len: Optional[int] = None, min_history: Optional[int] = None,
-                  device_arg: str = "auto", debug: bool = False) -> Optional[Dict]:
-    ddp = int(os.environ.get("WORLD_SIZE", "1")) > 1
-    rank = int(os.environ.get("RANK", "0"))
+                  device_arg: str = "auto", debug: bool = False,
+                  skip_existing: bool = False) -> Optional[Dict]:
+    ensure_dist()
+    ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
+    rank = torch.distributed.get_rank() if ddp else 0
+    metrics_fp = PATHS["metrics_root"] / experiment / f"{seed}.json"
+    if skip_existing and metrics_fp.exists():
+        if rank == 0:
+            print(f"[skip] {metrics_fp} already exists, loading it")
+            return json.loads(metrics_fp.read_text())
+        return None
     if ddp:
-        backend = "nccl" if torch.cuda.is_available() else "gloo"
-        torch.distributed.init_process_group(backend)
         if torch.cuda.is_available():
             device = torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
         else:
@@ -328,6 +362,4 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
         logger.info(f"ner={ner}")
         logger.info(f"metrics: probe={probe_metrics} full={full_metrics}")
 
-    if ddp:
-        torch.distributed.destroy_process_group()
     return metrics
