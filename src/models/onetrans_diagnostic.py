@@ -216,8 +216,8 @@ class OneTransBlock(nn.Module):
             if return_states:
                 states.append(ps_tokens)
         if return_states:
-            return ns_tokens, states
-        return ns_tokens
+            return ns_tokens, states, ps_tokens
+        return ns_tokens, ps_tokens
 
 
 class OneTransDiagnostic(nn.Module):
@@ -303,12 +303,18 @@ class OneTransDiagnostic(nn.Module):
         ns_tokens = self.unified_tokenizer(feature_embeddings)
 
         if return_sequence_states:
-            ns_tokens, states = self.backbone(s_tokens, ns_tokens, hist_mask, return_states=True)
+            ns_tokens, states, s_final = self.backbone(s_tokens, ns_tokens, hist_mask, return_states=True)
         else:
             states = None
-            ns_tokens = self.backbone(s_tokens, ns_tokens, hist_mask)
+            ns_tokens, s_final = self.backbone(s_tokens, ns_tokens, hist_mask)
 
         logit = self.tower(ns_tokens.flatten(start_dim=1)).squeeze(-1)
+        # The reference structure discards the last layer's sequence-FFN output
+        # (only NS tokens reach the head), leaving those params without any
+        # autograd path. Adding `0.0 * sum` gives them a strictly-zero gradient
+        # path so DDP needs no find_unused_parameters (a fragile combination
+        # with gradient accumulation). This is an exact numerical no-op.
+        logit = logit + 0.0 * s_final.sum()
         out = {"logit": logit, "pred": torch.sigmoid(logit)}
         if return_sequence_states:
             out["states"] = states

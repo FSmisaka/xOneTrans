@@ -259,16 +259,14 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
     field_mask = build_field_mask(enabled_fields).to(device) if enabled_fields is not None else None
     model = MaskedOneTrans(base, field_mask)
     if ddp:
-        # The reference OneTrans discards the last layer's sequence-FFN output
-        # (the block returns only NS tokens), so those params never receive
-        # grads -- identical to single-process behavior, but DDP needs
-        # find_unused_parameters to tolerate them.
+        # The last layer's sequence-FFN receives a strictly-zero gradient path
+        # inside the model forward, so every parameter participates in
+        # backward and find_unused_parameters is not needed (it is fragile
+        # together with gradient accumulation / no_sync).
         if torch.cuda.is_available():
-            model = torch.nn.parallel.DistributedDataParallel(
-                model, device_ids=[device.index], find_unused_parameters=True)
+            model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[device.index])
         else:
-            model = torch.nn.parallel.DistributedDataParallel(
-                model, find_unused_parameters=True)
+            model = torch.nn.parallel.DistributedDataParallel(model)
     accum_steps = accum_steps_for(max_len, MODEL_CFG["batch_size"], device)
     eval_bs = max(256, MODEL_CFG["eval_batch_size"] * MODEL_CFG["max_history_len"] // max_len)
     model, train_info = train_model(model, datasets, seed, experiment, logger, device, ddp=ddp,

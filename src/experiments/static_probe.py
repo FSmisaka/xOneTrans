@@ -109,7 +109,7 @@ def run_static_probe(data, dataset_key: str, device_arg="auto") -> dict:
     base = _logloss(model, cal_tensors, fields, y_cal)
     rng = np.random.default_rng(EXP_CFG["importance_seed"])
     importance = {}
-    for f in [fl for fl in fields if fl != "item_id"]:
+    for f in [fl for fl in fields if fl != "item_index"]:
         deltas = []
         for rep in range(EXP_CFG["n_importance_permutations"]):
             perm_idx = rng.permutation(len(cal_df))
