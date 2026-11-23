@@ -1,4 +1,4 @@
-# SPEC.md — Task-aware Representation Gating
+# Task-aware Representation Gating
 
 ## 1. 项目目标
 

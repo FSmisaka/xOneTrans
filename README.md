@@ -1,6 +1,6 @@
 # xOneTrans
 
-OneTrans 序列表示退化诊断实验（问题发现阶段，实验 1.1–1.4）。
+OneTrans 序列表示诊断实验（1.1–1.4 退化诊断、2.1–2.3 Task-aware Gate、实验 3 双分支 NER 正则）。
 
 ## 环境安装
 
@@ -30,6 +30,10 @@ bash scripts/14_run_exp_1_4.sh --dataset 1k   # 实验 1.4：历史长度（可�
 bash scripts/21_run_exp_2_1_task_aware_gate.sh --dataset 1k   # 实验 2.1：Task-aware Residual Gate vs Baseline
 bash scripts/22_run_exp_2_2_gate_ablation.sh --dataset 1k     # 实验 2.2：Gate 机制消融（Ungated/Fixed/Learned）
 bash scripts/23_run_exp_2_3_gate_analysis.sh --dataset 1k     # 实验 2.3：Gate 分布/干预与历史打乱敏感性分析
+bash scripts/31_run_exp_3_dual_branch.sh --dataset 1k         # 实验 3：双分支 OneTrans 与 High/Low NER 正则（默认 5 个条件）
+bash scripts/33_run_exp_3_lambda_sweep.sh --dataset 1k        # 实验 3：按配置的 λ 列表跑 high_only/low_only/dual_split
+bash scripts/34_summarize_exp_3.sh                            # 重建实验 3 的 summary.json / summary.csv / paired_deltas.csv
+bash scripts/35_test_exp_3.sh                                 # 实验 3 结构、可微 NER 一致性、梯度方向与隔离性检查
 bash scripts/20_summarize_results.sh          # 汇总全部结果到 results/metrics/summary.csv
 ```
 
@@ -52,4 +56,6 @@ CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node=2 --master_port=29501 -m src.
 - 图表：`results/figures/`
 - 检查点：`results/checkpoints/<experiment>/<seed>/best.pt`
 - 日志：`results/logs/<experiment>/<seed>.log`
+- 实验 3 每次运行：`results/runs/exp_3_dual_branch_ner/<condition>/seed_<seed>/`（含 config.yaml、metrics_by_epoch.csv、loss_curves.csv、metrics_test.json、checkpoint_best_mix.pt、model_summary.json）
+- 实验 3 多 seed 汇总：`results/metrics/exp_3_dual_branch_ner/{summary.json,summary.csv,paired_deltas.csv}`
 - 数据侧元数据（字段顺序、质量置换映射、字段重要性、UniRank 参考）：`data/metadata/`（属于实验数据定义，随数据而非模型输出）

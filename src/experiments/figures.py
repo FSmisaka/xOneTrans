@@ -90,6 +90,36 @@ def plot_group_bars(metric_by_cond, title, out_path: Path, ylabel: str = "value"
     plt.close(fig)
 
 
+def plot_path_metrics(summary: dict, title: str, out_path: Path):
+    """Grouped test AUC / LogLoss bars for single/dual prediction paths."""
+    _style()
+    conds = list(summary)
+    paths = sorted({p for c in conds for p in summary[c].get("test", {})})
+    if not conds or not paths:
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.2))
+    x = np.arange(len(conds))
+    width = 0.8 / max(len(paths), 1)
+    for i, metric in enumerate(("auc", "logloss")):
+        for j, path in enumerate(paths):
+            means = [summary[c].get("test", {}).get(path, {}).get(metric, {}).get("mean", np.nan)
+                     for c in conds]
+            stds = [summary[c].get("test", {}).get(path, {}).get(metric, {}).get("std", 0.0)
+                    for c in conds]
+            axes[i].bar(x + (j - len(paths) / 2) * width, means, width, yerr=stds,
+                        capsize=2, label=path)
+        axes[i].set_xticks(x)
+        axes[i].set_xticklabels(conds, rotation=20, ha="right")
+        axes[i].set_ylabel(metric.upper() if metric == "auc" else "LogLoss")
+        axes[i].set_title(f"Test {metric.upper() if metric == 'auc' else 'LogLoss'}")
+        axes[i].legend(fontsize=8)
+    fig.suptitle(title)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
 def plot_gate_outputs(experiment_summary: dict, figures_root: Path, exp_id: str):
     """Gate distribution / gate-vs-length / gate-vs-group-AUC plots for exp 2.3."""
     import json as _json

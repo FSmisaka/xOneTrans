@@ -360,7 +360,8 @@ class OneTransDiagnostic(nn.Module):
 
     def forward(self, batch: Dict[str, torch.Tensor], field_mask: Optional[torch.Tensor] = None,
                 return_sequence_states: bool = False, gate_override: Optional[str] = None,
-                return_gate: bool = False):
+                return_gate: bool = False, return_readout: bool = False,
+                return_last_state: bool = False):
         hist_item = batch["hist_item"]
         hist_action = batch["hist_action"]
         hist_mask = batch["hist_mask"].to(torch.float32)
@@ -394,7 +395,8 @@ class OneTransDiagnostic(nn.Module):
             states = None
             ns_tokens, s_final = self.backbone(s_tokens, ns_tokens, hist_mask, s_transform=s_transform)
 
-        logit = self.tower(ns_tokens.flatten(start_dim=1)).squeeze(-1)
+        readout = ns_tokens.flatten(start_dim=1)
+        logit = self.tower(readout).squeeze(-1)
         # The reference structure discards the last layer's sequence-FFN output
         # (only NS tokens reach the head), leaving those params without any
         # autograd path. Adding `0.0 * sum` gives them a strictly-zero gradient
@@ -404,6 +406,11 @@ class OneTransDiagnostic(nn.Module):
         out = {"logit": logit, "pred": torch.sigmoid(logit)}
         if return_sequence_states:
             out["states"] = states
+            out["hist_mask"] = hist_mask
+        if return_readout:
+            out["readout"] = readout
+        if return_last_state:
+            out["last_state"] = s_final
             out["hist_mask"] = hist_mask
         if return_gate and self.residual_gate is not None:
             out["gate"] = self.residual_gate.last_g

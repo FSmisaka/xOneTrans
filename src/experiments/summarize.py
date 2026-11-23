@@ -44,6 +44,18 @@ def flatten(metrics: dict) -> dict:
         row[f"intervention__{arm}__test_logloss"] = vals.get("test_logloss")
     for layer, val in (metrics.get("ner") or {}).items():
         row[f"ner__{layer}"] = val
+    for split in ("valid", "test"):
+        for path, vals in (metrics.get(split) or {}).items():
+            row[f"{split}__{path}__auc"] = vals.get("auc")
+            row[f"{split}__{path}__logloss"] = vals.get("logloss")
+    for ner_key in ("ner_valid", "ner_test"):
+        for branch, layers in (metrics.get(ner_key) or {}).items():
+            for layer, val in layers.items():
+                row[f"{ner_key}__{branch}__{layer}"] = val
+    if metrics.get("mode"):
+        row["mode"] = metrics["mode"]
+        row["lambda_high"] = (metrics.get("variable") or {}).get("lambda_high")
+        row["lambda_low"] = (metrics.get("variable") or {}).get("lambda_low")
     return row
 
 
