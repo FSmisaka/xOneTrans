@@ -33,7 +33,15 @@ def flatten(metrics: dict) -> dict:
         "n_params": metrics.get("training_cost", {}).get("n_params"),
         "throughput_samples_per_sec": metrics.get("training_cost", {}).get("throughput_samples_per_sec"),
         "peak_memory_mb": metrics.get("training_cost", {}).get("peak_memory_mb"),
+        "shuffle_delta_order_auc": (metrics.get("history_shuffle") or {}).get("delta_order_auc"),
+        "shuffle_delta_order_logloss": (metrics.get("history_shuffle") or {}).get("delta_order_logloss"),
+        "shuffle_permuted_test_auc": (metrics.get("history_shuffle") or {}).get("permuted_test_auc"),
+        "gate_mean": ((metrics.get("gate_stats") or {}).get("overall") or {}).get("mean"),
+        "gate_std": ((metrics.get("gate_stats") or {}).get("overall") or {}).get("std"),
     }
+    for arm, vals in (metrics.get("gate_intervention") or {}).items():
+        row[f"intervention__{arm}__test_auc"] = vals.get("test_auc")
+        row[f"intervention__{arm}__test_logloss"] = vals.get("test_logloss")
     for layer, val in (metrics.get("ner") or {}).items():
         row[f"ner__{layer}"] = val
     return row

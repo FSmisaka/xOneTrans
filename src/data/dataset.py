@@ -108,11 +108,12 @@ class QualityTransform:
 class KuaiRandSequenceDataset(Dataset):
     def __init__(self, data: KuaiRandData, split: str, max_len: int,
                  transform: Optional[QualityTransform] = None, min_history: Optional[int] = None,
-                 max_rows: Optional[int] = None):
+                 max_rows: Optional[int] = None, shuffle_history_seed: Optional[int] = None):
         self.data = data
         self.split = split
         self.max_len = max_len
         self.transform = transform
+        self.shuffle_history_seed = shuffle_history_seed
         df = data.splits[split]
         self.orig_ctx_cols = {f: df[f].values.astype(np.int64) for f in DATA_CFG["context_fields"]}
         if min_history is not None:
@@ -158,6 +159,9 @@ class KuaiRandSequenceDataset(Dataset):
         pos = int(self.position[i])
         start = max(0, pos - self.max_len)
         items, actions = self.data.history.slice(int(self.user_index[i]), start, pos)
+        if self.shuffle_history_seed is not None and len(items) > 1:
+            perm = np.random.default_rng(self.shuffle_history_seed + i).permutation(len(items))
+            items, actions = items[perm], actions[perm]
         sample = {
             "hist_item": torch.from_numpy(items.astype(np.int64)),
             "hist_action": torch.from_numpy(actions.astype(np.int64)),

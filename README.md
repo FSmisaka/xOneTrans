@@ -27,6 +27,9 @@ bash scripts/11_run_exp_1_1.sh --dataset 1k   # 实验 1.1：非序列特征数�
 bash scripts/12_run_exp_1_2.sh --dataset 1k   # 实验 1.2：非序列特征质量（q=1.0~0.0，含字段重要性 Q_j）
 bash scripts/13_run_exp_1_3.sh --dataset 1k   # 实验 1.3：非序列特征类型（User/Context/TargetItem/All/None）
 bash scripts/14_run_exp_1_4.sh --dataset 1k   # 实验 1.4：历史长度（可选，默认在 config/exp_1_4_length.py 中关闭）
+bash scripts/21_run_exp_2_1_task_aware_gate.sh --dataset 1k   # 实验 2.1：Task-aware Residual Gate vs Baseline
+bash scripts/22_run_exp_2_2_gate_ablation.sh --dataset 1k     # 实验 2.2：Gate 机制消融（Ungated/Fixed/Learned）
+bash scripts/23_run_exp_2_3_gate_analysis.sh --dataset 1k     # 实验 2.3：Gate 分布/干预与历史打乱敏感性分析
 bash scripts/20_summarize_results.sh          # 汇总全部结果到 results/metrics/summary.csv
 ```
 

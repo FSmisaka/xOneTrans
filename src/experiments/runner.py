@@ -23,8 +23,10 @@ from config.onetrans import CONFIG as MODEL_CFG
 from config.sequence_probe import CONFIG as PROBE_CFG
 from src.data.dataset import KuaiRandData, KuaiRandSequenceDataset, QualityTransform, collate_batch, VARIABLE_FIELDS
 from src.models.onetrans_diagnostic import OneTransDiagnostic
-from src.experiments.diagnostics import (collect_states, compute_layer_ner, fit_sequence_probe,
-                                         select_diagnostic_indices, select_ner_token_pairs)
+from src.experiments import gate_analysis
+from src.experiments.diagnostics import (collect_states, compute_layer_ner, evaluate,
+                                         fit_sequence_probe, select_diagnostic_indices,
+                                         select_ner_token_pairs, state_names)
 from src.utils.logging import setup_logger
 from src.utils.metrics import auc_score, logloss_score
 from src.utils.seed import set_seed
@@ -70,20 +72,6 @@ class MaskedOneTrans(nn.Module):
     @property
     def token_dim(self):
         return self.model.token_dim
-
-
-@torch.no_grad()
-def evaluate(model, loader, device) -> Dict[str, np.ndarray]:
-    if hasattr(model, "module"):
-        model = model.module  # bypass the DDP wrapper: eval forward must not touch the reducer
-    model.eval()
-    preds, labels = [], []
-    for batch in loader:
-        batch = {k: v.to(device) for k, v in batch.items()}
-        out = model(batch)
-        preds.append(out["pred"].float().cpu().numpy())
-        labels.append(batch["label"].cpu().numpy())
-    return {"y_pred": np.concatenate(preds), "y_true": np.concatenate(labels)}
 
 
 def train_model(model, datasets, seed, experiment, logger, device, ddp=False, epochs=None,
@@ -220,7 +208,8 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
                   enabled_fields=None, transform: Optional[QualityTransform] = None,
                   max_history_len: Optional[int] = None, min_history: Optional[int] = None,
                   device_arg: str = "auto", debug: bool = False,
-                  skip_existing: bool = False) -> Optional[Dict]:
+                  skip_existing: bool = False, model_overrides: Optional[Dict] = None,
+                  analyses: Optional[Dict] = None) -> Optional[Dict]:
     ensure_dist()
     ddp = torch.distributed.is_initialized() and torch.distributed.get_world_size() > 1
     rank = torch.distributed.get_rank() if ddp else 0
@@ -255,7 +244,9 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
     if logger:
         logger.info("samples: " + ", ".join(f"{s}={len(d)}" for s, d in datasets.items()))
 
-    base = OneTransDiagnostic(data.vocab_sizes(), MODEL_CFG).to(device)
+    base = OneTransDiagnostic(data.vocab_sizes(), {**MODEL_CFG, **(model_overrides or {})}).to(device)
+    gate_on = bool((model_overrides or {}).get("use_residual_gate", MODEL_CFG.get("use_residual_gate", False)))
+    names = state_names({**MODEL_CFG, **(model_overrides or {})}["num_layers"], gate_on)
     field_mask = build_field_mask(enabled_fields).to(device) if enabled_fields is not None else None
     model = MaskedOneTrans(base, field_mask)
     if ddp:
@@ -297,8 +288,9 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
         rank_arr, pos_arr = select_ner_token_pairs(lengths, PROBE_CFG["ner_max_tokens"],
                                                    PROBE_CFG["ner_seed"])
         valid_states = collect_states(core, datasets["valid"], diag_idx, rank_arr, pos_arr,
-                                      eval_bs, device, pool_last_layer=True)
-        ner = compute_layer_ner(valid_states["tokens"])
+                                      eval_bs, device, pool_last_layer=True,
+                                      state_names_list=names)
+        ner = compute_layer_ner(valid_states["tokens"], names)
 
         probe_rng = np.random.default_rng(PROBE_CFG["diagnostic_seed"])
         probe_train_idx = np.sort(probe_rng.permutation(len(datasets["train"]))[: PROBE_CFG["probe_train_max"]])
@@ -306,14 +298,49 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
         empty_r = np.zeros(0, dtype=np.int64)
         empty_p = np.zeros(0, dtype=np.int64)
         train_states = collect_states(core, datasets["train"], probe_train_idx, empty_r, empty_p,
-                                      eval_bs, device, pool_last_layer=True)
+                                      eval_bs, device, pool_last_layer=True,
+                                      state_names_list=names)
         test_states = collect_states(core, datasets["test"], probe_test_idx, empty_r, empty_p,
-                                     eval_bs, device, pool_last_layer=True)
+                                     eval_bs, device, pool_last_layer=True,
+                                     state_names_list=names)
         probe_metrics = fit_sequence_probe(
             train_states["pooled"].numpy(), train_states["labels"].numpy(),
             valid_states["pooled"].numpy(), valid_states["labels"].numpy(),
             test_states["pooled"].numpy(), test_states["labels"].numpy(),
         )
+
+        metrics_dir = PATHS["metrics_root"] / experiment
+        analyses = analyses or {}
+        analysis_metrics: Dict = {}
+        if analyses.get("history_shuffle"):
+            hs_cfg = analyses["history_shuffle"] or {}
+            analysis_metrics["history_shuffle"] = gate_analysis.history_shuffle_metrics(
+                core, data, max_len, hs_cfg.get("seed", 2026), eval_bs, device,
+                full_metrics["full_test_auc"], full_metrics["full_test_logloss"],
+                max_rows=(dbg or {}).get("test_samples"))
+        if gate_on and analyses.get("gate_statistics"):
+            gs_cfg = analyses["gate_statistics"] or {}
+            analysis_metrics["gate_stats"] = gate_analysis.collect_gate_statistics(
+                core, datasets["test"], eval_bs, device,
+                gs_cfg.get("length_buckets", [1, 5, 20, 50, 101]),
+                gs_cfg.get("group_field", "duration_bucket"), metrics_dir, seed)
+        if gate_on and analyses.get("gate_intervention"):
+            analysis_metrics["gate_intervention"] = {"learned": {
+                "test_auc": full_metrics["full_test_auc"],
+                "test_logloss": full_metrics["full_test_logloss"],
+                "gate_out_ner": ner.get("gate_out"),
+                "layer_4_ner": ner.get(f"layer_{MODEL_CFG['num_layers']}")}}
+            for override in ("zero", "one"):
+                res_ov = evaluate(core, test_loader, device, gate_override=override)
+                st_ov = collect_states(core, datasets["valid"], diag_idx, rank_arr, pos_arr,
+                                       eval_bs, device, pool_last_layer=False,
+                                       gate_override=override, state_names_list=names)
+                ner_ov = compute_layer_ner(st_ov["tokens"], names)
+                analysis_metrics["gate_intervention"][override] = {
+                    "test_auc": auc_score(res_ov["y_true"], res_ov["y_pred"]),
+                    "test_logloss": logloss_score(res_ov["y_true"], res_ov["y_pred"]),
+                    "gate_out_ner": ner_ov.get("gate_out"),
+                    "layer_4_ner": ner_ov.get(f"layer_{MODEL_CFG['num_layers']}")}
 
         ckpt_dir = PATHS["checkpoints_root"] / experiment / str(seed)
         ckpt_dir.mkdir(parents=True, exist_ok=True)
@@ -334,7 +361,8 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
                                 "max_history_len": max_len, "min_history": min_history,
                                 "enabled_fields": enabled_fields,
                                 "transformed": transform is not None,
-                                "debug": debug},
+                                "debug": debug, "model_overrides": model_overrides,
+                                "analyses": {k: v for k, v in (analyses or {}).items()}},
             "seed": seed,
             "sample_counts": {s: len(d) for s, d in datasets.items()},
             "diagnostic_samples": int(len(diag_idx)),
@@ -344,6 +372,7 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
             "ner": ner,
             **probe_metrics,
             **full_metrics,
+            **analysis_metrics,
             "training_cost": {
                 "n_params": sum(p.numel() for p in base.parameters()),
                 "throughput_samples_per_sec": train_info["throughput_samples_per_sec"],
@@ -353,7 +382,6 @@ def run_condition(experiment: str, condition: str, dataset_key: str, seed: int,
             },
             "best_checkpoint": str(ckpt_path),
         }
-        metrics_dir = PATHS["metrics_root"] / experiment
         metrics_dir.mkdir(parents=True, exist_ok=True)
         with open(metrics_dir / f"{seed}.json", "w") as f:
             json.dump(metrics, f, indent=2)

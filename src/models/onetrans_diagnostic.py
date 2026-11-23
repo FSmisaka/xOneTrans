@@ -162,6 +162,58 @@ class MixedFFN(nn.Module):
         return s_out, ns_out
 
 
+class ResidualRepresentationGate(nn.Module):
+    """Task-aware residual representation gate (SPEC2 section 3).
+
+    Z_r = W2(GELU(W1(LN(H)))) applied per token; gate G = sigmoid(MLP([h_p; E_t]))
+    with h_p the masked mean-pooled sequence summary and E_t the (projected)
+    target item id embedding; output Z_out = H + G[:, None, :] * Z_r, shared
+    across the history dimension per (sample, dim). Modes:
+    - "learned": full task-aware gate (spec 2.1 / 2.2 Learnable Gate)
+    - "fixed":   G = alpha, a fixed scalar (spec 2.2 Fixed Gate)
+    - "ungated": G = 1 (spec 2.2 Ungated Residual)
+    Padding positions are zeroed following the backbone mask convention."""
+
+    def __init__(self, token_dim, item_emb_dim, residual_hidden_dim, gate_hidden_dim,
+                 mode="learned", dropout=0.0, init_bias=0.0, fixed_alpha=0.5):
+        super().__init__()
+        self.mode = mode
+        self.fixed_alpha = fixed_alpha
+        self.norm = nn.LayerNorm(token_dim)
+        self.w1 = nn.Linear(token_dim, residual_hidden_dim)
+        self.w2 = nn.Linear(residual_hidden_dim, token_dim)
+        if mode == "learned":
+            self.item_proj = nn.Linear(item_emb_dim, token_dim)
+            self.gate_mlp = nn.Sequential(
+                nn.Linear(2 * token_dim, gate_hidden_dim),
+                nn.GELU(),
+                nn.Dropout(dropout),
+                nn.Linear(gate_hidden_dim, token_dim),
+            )
+            nn.init.zeros_(self.gate_mlp[-1].weight)
+            nn.init.constant_(self.gate_mlp[-1].bias, init_bias)
+        self.last_zr: Optional[torch.Tensor] = None
+        self.last_g: Optional[torch.Tensor] = None
+
+    def forward(self, h, item_emb, mask, gate_override=None):
+        zr = self.w2(F.gelu(self.w1(self.norm(h))))
+        zr = zr * mask.unsqueeze(-1).to(zr.dtype)
+        if self.mode == "learned":
+            h_p = (h * mask.unsqueeze(-1).to(h.dtype)).sum(1) / mask.sum(1, keepdim=True).clamp_min(1.0).to(h.dtype)
+            g = torch.sigmoid(self.gate_mlp(torch.cat([h_p, self.item_proj(item_emb)], dim=-1)))
+        elif self.mode == "fixed":
+            g = torch.full((h.shape[0], h.shape[2]), self.fixed_alpha, device=h.device, dtype=h.dtype)
+        else:
+            g = torch.ones(h.shape[0], h.shape[2], device=h.device, dtype=h.dtype)
+        if gate_override == "zero":
+            g = torch.zeros_like(g)
+        elif gate_override == "one":
+            g = torch.ones_like(g)
+        self.last_zr = zr
+        self.last_g = g
+        return h + g.unsqueeze(1) * zr
+
+
 class OneTransBlock(nn.Module):
     """Pre-norm dual-stream backbone. With reduction_ratio r, each layer drops
     the first r * L sequence query tokens (NS tokens are never pruned)."""
@@ -183,7 +235,7 @@ class OneTransBlock(nn.Module):
             MixedFFN(input_dim, num_ns_token, dnn_activations, expansion_factor) for _ in range(num_layers)
         ])
 
-    def forward(self, s_tokens, ns_tokens, mask=None, return_states=False):
+    def forward(self, s_tokens, ns_tokens, mask=None, return_states=False, s_transform=None):
         if mask is not None:
             s_tokens = s_tokens * mask.unsqueeze(-1).to(s_tokens.dtype)
             q_mask = mask
@@ -193,6 +245,12 @@ class OneTransBlock(nn.Module):
         states: List[torch.Tensor] = []
         if return_states:
             states.append(ps_tokens)
+        for i in range(self.num_layers):
+            if i == self.num_layers - 1 and s_transform is not None:
+                ps_tokens = s_transform(ps_tokens)
+                s_tokens = ps_tokens
+                if return_states:
+                    states.append(ps_tokens)
         for i in range(self.num_layers):
             sequence_start = int(ps_tokens.size(1) * self.reduction_ratio)
             if sequence_start > 0:
@@ -273,6 +331,25 @@ class OneTransDiagnostic(nn.Module):
             dropout_rates=model_cfg.get("net_dropout", 0.0),
         )
 
+        # Constructed last so baseline parameter init (RNG draw order) is
+        # untouched; when disabled the module does not exist and the forward
+        # path is bitwise identical to the original model.
+        self.residual_gate = None
+        self.gate_mode = None
+        if model_cfg.get("use_residual_gate", False):
+            gate_cfg = model_cfg.get("residual_gate", {})
+            self.gate_mode = gate_cfg.get("mode", "learned")
+            self.residual_gate = ResidualRepresentationGate(
+                token_dim=token_dim,
+                item_emb_dim=emb,
+                residual_hidden_dim=gate_cfg.get("residual_hidden_dim", 2 * token_dim),
+                gate_hidden_dim=gate_cfg.get("gate_hidden_dim", 2 * token_dim),
+                mode=self.gate_mode,
+                dropout=gate_cfg.get("gate_dropout", 0.0),
+                init_bias=gate_cfg.get("gate_init_bias", 0.0),
+                fixed_alpha=gate_cfg.get("fixed_gate_alpha", 0.5),
+            )
+
     def param_groups(self, dense_lr: float, sparse_lr: float):
         sparse_ids = {id(p) for emb in [self.item_embedding, self.action_embedding, *self.field_embeddings.values()]
                       for p in emb.parameters()}
@@ -282,7 +359,8 @@ class OneTransDiagnostic(nn.Module):
         return [{"params": dense, "lr": dense_lr}, {"params": sparse, "lr": sparse_lr}]
 
     def forward(self, batch: Dict[str, torch.Tensor], field_mask: Optional[torch.Tensor] = None,
-                return_sequence_states: bool = False):
+                return_sequence_states: bool = False, gate_override: Optional[str] = None,
+                return_gate: bool = False):
         hist_item = batch["hist_item"]
         hist_action = batch["hist_action"]
         hist_mask = batch["hist_mask"].to(torch.float32)
@@ -302,11 +380,19 @@ class OneTransDiagnostic(nn.Module):
 
         ns_tokens = self.unified_tokenizer(feature_embeddings)
 
+        s_transform = None
+        if self.residual_gate is not None:
+            item_emb = self.item_embedding(batch["item_id"])
+            s_transform = lambda h: self.residual_gate(h, item_emb, hist_mask, gate_override)
+
         if return_sequence_states:
-            ns_tokens, states, s_final = self.backbone(s_tokens, ns_tokens, hist_mask, return_states=True)
+            ns_tokens, states, s_final = self.backbone(
+                s_tokens, ns_tokens, hist_mask, return_states=True, s_transform=s_transform)
+            if self.residual_gate is not None:
+                states.append(self.residual_gate.last_zr)
         else:
             states = None
-            ns_tokens, s_final = self.backbone(s_tokens, ns_tokens, hist_mask)
+            ns_tokens, s_final = self.backbone(s_tokens, ns_tokens, hist_mask, s_transform=s_transform)
 
         logit = self.tower(ns_tokens.flatten(start_dim=1)).squeeze(-1)
         # The reference structure discards the last layer's sequence-FFN output
@@ -319,4 +405,6 @@ class OneTransDiagnostic(nn.Module):
         if return_sequence_states:
             out["states"] = states
             out["hist_mask"] = hist_mask
+        if return_gate and self.residual_gate is not None:
+            out["gate"] = self.residual_gate.last_g
         return out

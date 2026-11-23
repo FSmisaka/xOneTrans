@@ -14,6 +14,20 @@ from config.sequence_probe import CONFIG as PROBE_CFG
 from src.data.dataset import KuaiRandSequenceDataset, collate_batch
 
 
+@torch.no_grad()
+def evaluate(model, loader, device, gate_override: str = None) -> Dict[str, np.ndarray]:
+    if hasattr(model, "module"):
+        model = model.module  # bypass the DDP wrapper: eval forward must not touch the reducer
+    model.eval()
+    preds, labels = [], []
+    for batch in loader:
+        batch = {k: v.to(device) for k, v in batch.items()}
+        out = model(batch, gate_override=gate_override)
+        preds.append(out["pred"].float().cpu().numpy())
+        labels.append(batch["label"].cpu().numpy())
+    return {"y_pred": np.concatenate(preds), "y_true": np.concatenate(labels)}
+
+
 def select_diagnostic_indices(dataset: KuaiRandSequenceDataset, n_samples: int, seed: int) -> np.ndarray:
     rng = np.random.default_rng(seed)
     idx = rng.permutation(len(dataset))[: min(n_samples, len(dataset))]
@@ -43,10 +57,16 @@ def select_ner_token_pairs(lengths: np.ndarray, max_tokens: int, seed: int):
 @torch.no_grad()
 def collect_states(model, dataset: KuaiRandSequenceDataset, sample_indices: np.ndarray,
                    rank_arr: np.ndarray, pos_arr: np.ndarray, batch_size: int,
-                   device: torch.device, pool_last_layer: bool):
+                   device: torch.device, pool_last_layer: bool, gate_override: str = None,
+                   state_names_list: List[str] = None):
     """Per-layer selected token states (FP32, CPU) and optional masked-mean
-    pooled last-layer vectors with labels."""
+    pooled vectors of the final backbone layer (with the gate enabled the
+    appended residual state is not the pooling target) with labels."""
     model.eval()
+    pool_idx = -1
+    if pool_last_layer and state_names_list:
+        layer_positions = [i for i, n in enumerate(state_names_list) if n.startswith("layer_")]
+        pool_idx = layer_positions[-1]
     loader = DataLoader(Subset(dataset, sample_indices.tolist()), batch_size=batch_size,
                         shuffle=False, collate_fn=collate_batch)
     token_chunks: List[List[torch.Tensor]] = None
@@ -54,7 +74,7 @@ def collect_states(model, dataset: KuaiRandSequenceDataset, sample_indices: np.n
     consumed = 0
     for batch in loader:
         batch = {k: v.to(device) for k, v in batch.items()}
-        out = model(batch, return_sequence_states=True)
+        out = model(batch, return_sequence_states=True, gate_override=gate_override)
         states = out["states"]
         b = states[0].shape[0]
         if token_chunks is None:
@@ -69,7 +89,7 @@ def collect_states(model, dataset: KuaiRandSequenceDataset, sample_indices: np.n
                 token_chunks[li].append(flat.cpu())
         if pool_last_layer:
             mask = out["hist_mask"]
-            last = states[-1].float()
+            last = states[pool_idx].float()
             pooled.append(((last * mask.unsqueeze(-1)).sum(1)
                            / mask.sum(1, keepdim=True).clamp_min(1)).cpu())
             labels.append(batch["label"].cpu())
@@ -91,11 +111,18 @@ def normalized_effective_rank(H: torch.Tensor) -> float:
     return er / H.shape[1]
 
 
-def compute_layer_ner(tokens: List[torch.Tensor]) -> Dict[str, float]:
-    return {
-        ("backbone_input" if li == 0 else f"layer_{li}"): normalized_effective_rank(H)
-        for li, H in enumerate(tokens)
-    }
+def state_names(num_layers: int, gate_enabled: bool) -> List[str]:
+    names = ["backbone_input"] + [f"layer_{i}" for i in range(1, num_layers + 1)]
+    if gate_enabled:
+        names.insert(num_layers, "gate_out")
+        names.append("residual")
+    return names
+
+
+def compute_layer_ner(tokens: List[torch.Tensor], names: List[str] = None) -> Dict[str, float]:
+    if names is None:
+        names = [("backbone_input" if li == 0 else f"layer_{li}") for li in range(len(tokens))]
+    return {name: normalized_effective_rank(H) for name, H in zip(names, tokens)}
 
 
 def fit_sequence_probe(train_X: np.ndarray, train_y: np.ndarray,

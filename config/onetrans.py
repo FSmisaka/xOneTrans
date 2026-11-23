@@ -31,4 +31,5 @@ CONFIG: Dict[str, Any] = {
     "device": "auto",
     "amp_dtype": "none",
     "num_action_codes": 64,
+    "use_residual_gate": False,
 }

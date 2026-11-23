@@ -1,5 +1,6 @@
 """Result figures. All plots show mean and std across seeds."""
 
+import csv
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
@@ -65,6 +66,77 @@ def plot_field_importance(q_j: dict, out_path: Path):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)
+
+
+def plot_group_bars(metric_by_cond, title, out_path: Path, ylabel: str = "value"):
+    _style()
+    conds = list(metric_by_cond.keys())
+    keys = [k for k in metric_by_cond[conds[0]]]
+    fig, axes = plt.subplots(1, len(keys), figsize=(5 * len(keys), 4))
+    axes = np.atleast_1d(axes)
+    x = np.arange(len(conds))
+    for i, k in enumerate(keys):
+        means = [metric_by_cond[c][k]["mean"] for c in conds]
+        stds = [metric_by_cond[c][k]["std"] for c in conds]
+        axes[i].bar(x, means, yerr=stds, capsize=3)
+        axes[i].set_xticks(x)
+        axes[i].set_xticklabels(conds, rotation=20)
+        axes[i].set_ylabel(ylabel)
+        axes[i].set_title(k)
+    fig.suptitle(title)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_gate_outputs(experiment_summary: dict, figures_root: Path, exp_id: str):
+    """Gate distribution / gate-vs-length / gate-vs-group-AUC plots for exp 2.3."""
+    import json as _json
+    _style()
+    metrics_root = figures_root.parent / "metrics"
+    gate_npy_files = sorted(metrics_root.glob(f"{exp_id}_*/gate_values_*.npy"))
+    if gate_npy_files:
+        fig, ax = plt.subplots(figsize=(6, 4))
+        bins = np.linspace(0, 1, 51)
+        for fp in gate_npy_files:
+            g = np.load(fp).flatten()
+            ax.hist(g, bins=bins, density=True, alpha=0.4, label=fp.parent.name.split("_")[-1] + "/" + fp.stem.split("_")[-1])
+        ax.set_xlabel("gate value")
+        ax.set_ylabel("density")
+        ax.set_title("Gate value distribution (test set, per seed)")
+        ax.legend(fontsize=7)
+        fig.tight_layout()
+        fig.savefig(figures_root / f"{exp_id}_gate_distribution.png")
+        plt.close(fig)
+
+    csvs = sorted(metrics_root.glob(f"{exp_id}_*/gate_stats_*.csv"))
+    if csvs:
+        rows = []
+        for fp in csvs:
+            with open(fp) as f:
+                for r in csv.DictReader(f):
+                    r["seed"] = fp.stem.split("_")[-1]
+                    rows.append(r)
+        for scope in sorted({r["scope"] for r in rows}):
+            sel = [r for r in rows if r["scope"] == scope]
+            keys = sorted({r["key"] for r in sel}, key=lambda k: float(str(k).strip("[]").split(",")[0]))
+            fig, ax1 = plt.subplots(figsize=(7, 4))
+            xs = np.arange(len(keys))
+            gm = [np.nanmean([float(r["gate_mean"]) for r in sel if r["key"] == k]) for k in keys]
+            gs = [np.nanstd([float(r["gate_mean"]) for r in sel if r["key"] == k]) for k in keys]
+            auc_m = [np.nanmean([float(r["auc"]) for r in sel if r["key"] == k]) for k in keys]
+            ax1.bar(xs, gm, yerr=gs, capsize=3, color="tab:blue", alpha=0.7, label="gate mean")
+            ax1.set_ylabel("gate mean")
+            ax1.set_xticks(xs)
+            ax1.set_xticklabels(keys, rotation=30)
+            ax2 = ax1.twinx()
+            ax2.plot(xs, auc_m, marker="o", color="tab:red", label="bucket AUC")
+            ax2.set_ylabel("AUC")
+            ax1.set_title(f"Gate vs {scope} (bars: gate, line: AUC)")
+            fig.tight_layout()
+            fig.savefig(figures_root / f"{exp_id}_gate_vs_{scope}.png")
+            plt.close(fig)
 
 
 def plot_metric_bars(metric_by_cond, title, out_path: Path):
