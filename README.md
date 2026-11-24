@@ -1,6 +1,6 @@
 # xOneTrans
 
-OneTrans 序列表示诊断实验（1.1–1.4 退化诊断、2.1–2.3 Task-aware Gate、实验 3 双分支 NER 正则）。
+OneTrans 序列表示诊断实验（1.1–1.4 退化诊断、2.1–2.3 Task-aware Gate、实验 3 双分支 NER 正则、实验 4 连续谱变换族）。
 
 ## 环境安装
 
@@ -34,8 +34,13 @@ bash scripts/31_run_exp_3_dual_branch.sh --dataset 1k         # 实验 3：双�
 bash scripts/33_run_exp_3_lambda_sweep.sh --dataset 1k        # 实验 3：按配置的 λ 列表跑 high_only/low_only/dual_split
 bash scripts/34_summarize_exp_3.sh                            # 重建实验 3 的 summary.json / summary.csv / paired_deltas.csv
 bash scripts/35_test_exp_3.sh                                 # 实验 3 结构、可微 NER 一致性、梯度方向与隔离性检查
+bash scripts/41_run_exp_4_continuous_spectral.sh --dataset 1k # 实验 4：共享 OneTrans + 连续谱变换与 alpha 融合
+bash scripts/42_summarize_exp_4.sh                            # 重建实验 4 的 summary.json / summary.csv / paired_deltas.csv
+bash scripts/43_test_exp_4.sh                                 # 实验 4 谱变换、identity、单调性、共享参数与梯度检查
 bash scripts/20_summarize_results.sh          # 汇总全部结果到 results/metrics/summary.csv
 ```
+
+实验 4 需要 Exp3 `single_baseline` 的最佳 checkpoint（默认路径见 `config/exp_4_continuous_spectral.py`）；缺失时会明确报错，不会随机初始化基线。
 
 正式实验将 `--dataset 1k` 替换为 `--dataset 27k`。所有脚本支持 `--seeds`、`--device` 透传，例如 `bash scripts/11_run_exp_1_1.sh --dataset 1k --seeds 2026`。
 
@@ -46,6 +51,7 @@ bash scripts/20_summarize_results.sh          # 汇总全部结果到 results/me
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 -m src.experiments.run_experiment --exp 1_1 --dataset 1k  # 用指定 4 卡跑实验 1.1
 CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node=2 --master_port=29501 -m src.experiments.run_experiment --exp 1_2 --dataset 1k  # 同时用另外 2 张卡跑实验 1.2（注意换 master_port）
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29502 -m src.experiments.run_experiment --exp 4 --dataset 1k  # 4 卡 DDP 跑实验 4
 ```
 
 有效 batch（config/onetrans.py 的 batch_size=2048）在任意卡数下保持不变：micro batch = batch_size ÷ 累积步数 ÷ 卡数，全局梯度一致。
@@ -58,4 +64,6 @@ CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node=2 --master_port=29501 -m src.
 - 日志：`results/logs/<experiment>/<seed>.log`
 - 实验 3 每次运行：`results/runs/exp_3_dual_branch_ner/<condition>/seed_<seed>/`（含 config.yaml、metrics_by_epoch.csv、loss_curves.csv、metrics_test.json、checkpoint_best_mix.pt、model_summary.json）
 - 实验 3 多 seed 汇总：`results/metrics/exp_3_dual_branch_ner/{summary.json,summary.csv,paired_deltas.csv}`
+- 实验 4 每次运行：`results/runs/exp_4_continuous_spectral/<condition>/seed_<seed>/`（含 config.yaml、spectral_basis.pt、metrics_by_epoch.csv、loss_curves.csv、metrics_valid.json、metrics_test.json、checkpoint_best.pt、model_summary.json、alpha_node_metrics.csv、alpha_weight_stats.json）
+- 实验 4 多 seed 汇总：`results/metrics/exp_4_continuous_spectral/{summary.json,summary.csv,paired_deltas.csv}` 与 `results/metrics/summary_exp_4.json`
 - 数据侧元数据（字段顺序、质量置换映射、字段重要性、UniRank 参考）：`data/metadata/`（属于实验数据定义，随数据而非模型输出）

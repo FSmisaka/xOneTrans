@@ -42,8 +42,9 @@ def flatten(metrics: dict) -> dict:
     for arm, vals in (metrics.get("gate_intervention") or {}).items():
         row[f"intervention__{arm}__test_auc"] = vals.get("test_auc")
         row[f"intervention__{arm}__test_logloss"] = vals.get("test_logloss")
-    for layer, val in (metrics.get("ner") or {}).items():
-        row[f"ner__{layer}"] = val
+    if metrics.get("experiment") != "exp_4_continuous_spectral":
+        for layer, val in (metrics.get("ner") or {}).items():
+            row[f"ner__{layer}"] = val
     for split in ("valid", "test"):
         for path, vals in (metrics.get(split) or {}).items():
             row[f"{split}__{path}__auc"] = vals.get("auc")
@@ -56,6 +57,22 @@ def flatten(metrics: dict) -> dict:
         row["mode"] = metrics["mode"]
         row["lambda_high"] = (metrics.get("variable") or {}).get("lambda_high")
         row["lambda_low"] = (metrics.get("variable") or {}).get("lambda_low")
+    if metrics.get("experiment") == "exp_4_continuous_spectral":
+        row["kind"] = metrics.get("kind")
+        row["fusion"] = metrics.get("fusion")
+        row["alpha"] = metrics.get("alpha")
+        row["node_aux_loss_weight"] = metrics.get("node_aux_loss_weight")
+        for split in ("valid", "test"):
+            primary = metrics.get(f"{split}_primary") or {}
+            row[f"{split}_primary_auc"] = primary.get("auc")
+            row[f"{split}_primary_logloss"] = primary.get("logloss")
+            for alpha, vals in (metrics.get("node_metrics", {}).get(split) or {}).items():
+                row[f"{split}_node_{alpha}__auc"] = vals.get("auc")
+                row[f"{split}_node_{alpha}__logloss"] = vals.get("logloss")
+        summary = metrics.get("model_summary") or {}
+        row["n_params_total"] = summary.get("n_params_total")
+        row["n_params_trainable"] = summary.get("n_params_trainable")
+        row["train_seconds"] = summary.get("train_seconds")
     return row
 
 

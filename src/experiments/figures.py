@@ -199,3 +199,78 @@ def plot_metric_bars(metric_by_cond, title, out_path: Path):
     out_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out_path)
     plt.close(fig)
+
+
+def plot_series(series: dict, xlabel: str, ylabel: str, title: str, out_path: Path):
+    """Generic line plot; each entry is {'x': [...], 'y': [...], 'std': [...]}."""
+    _style()
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for label, data in series.items():
+        x = np.asarray(data["x"])
+        y = np.asarray(data["y"])
+        ax.plot(x, y, marker="o", label=str(label))
+        if data.get("std") is not None:
+            std = np.asarray(data["std"])
+            ax.fill_between(x, y - std, y + std, alpha=0.12)
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_condition_metrics(summary: dict, title: str, out_path: Path):
+    """Two panels: condition-wise valid/test AUC and LogLoss."""
+    _style()
+    conds = list(summary)
+    if not conds:
+        return
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.2))
+    x = np.arange(len(conds))
+    width = 0.36
+    for split, offset in (("valid", -width / 2), ("test", width / 2)):
+        auc = [summary[c].get(f"{split}_primary", {}).get("auc", {}).get("mean", np.nan)
+               for c in conds]
+        auc_std = [summary[c].get(f"{split}_primary", {}).get("auc", {}).get("std", 0.0)
+                   for c in conds]
+        ll = [summary[c].get(f"{split}_primary", {}).get("logloss", {}).get("mean", np.nan)
+              for c in conds]
+        ll_std = [summary[c].get(f"{split}_primary", {}).get("logloss", {}).get("std", 0.0)
+                  for c in conds]
+        axes[0].bar(x + offset, auc, width, yerr=auc_std, capsize=2, label=split)
+        axes[1].bar(x + offset, ll, width, yerr=ll_std, capsize=2, label=split)
+    for ax, name in ((axes[0], "AUC"), (axes[1], "LogLoss")):
+        ax.set_xticks(x)
+        ax.set_xticklabels(conds, rotation=25, ha="right")
+        ax.set_ylabel(name)
+        ax.set_title(name)
+        ax.legend(fontsize=8)
+    fig.suptitle(title)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)
+
+
+def plot_weight_distribution(series: dict, title: str, out_path: Path):
+    """Alpha-weight curves with P10-P90 bands; one line per condition."""
+    _style()
+    fig, ax = plt.subplots(figsize=(7, 4.5))
+    for label, data in series.items():
+        x = np.asarray(data["x"])
+        mean = np.asarray(data["mean"])
+        p10 = np.asarray(data["p10"])
+        p90 = np.asarray(data["p90"])
+        ax.plot(x, mean, marker="o", label=str(label))
+        ax.fill_between(x, p10, p90, alpha=0.12)
+    ax.set_xlabel("alpha")
+    ax.set_ylabel("mixture weight")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path)
+    plt.close(fig)

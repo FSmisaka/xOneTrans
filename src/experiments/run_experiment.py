@@ -1,7 +1,8 @@
-"""Unified experiment entry point for exp 1.1 - 1.4, 2.x and 3.
+"""Unified experiment entry point for exp 1.1 - 1.4, 2.x, 3 and 4.
 
 Usage: python -m src.experiments.run_experiment --exp 1_1 --dataset 1k
        python -m src.experiments.run_experiment --exp 3 --dataset 1k
+       python -m src.experiments.run_experiment --exp 4 --dataset 1k
 """
 
 import argparse
@@ -259,7 +260,7 @@ def run_experiment(exp: str, dataset_key: str, seeds, device_arg: str, debug: bo
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp", required=True,
-                        choices=["1_1", "1_2", "1_3", "1_4", "2_1", "2_2", "2_3", "3"])
+                        choices=["1_1", "1_2", "1_3", "1_4", "2_1", "2_2", "2_3", "3", "4"])
     parser.add_argument("--dataset", required=True, choices=["1k", "27k"])
     parser.add_argument("--seeds", nargs="+", type=int, default=None)
     parser.add_argument("--device", default="auto")
@@ -267,7 +268,7 @@ def main():
     parser.add_argument("--skip-existing", action="store_true",
                         help="skip (experiment, condition, seed) runs whose metrics JSON already exists")
     parser.add_argument("--conditions", nargs="+", default=None,
-                        help="exp 3: subset of config/exp_3_dual_branch_ner.py conditions")
+                        help="exp 3/4: subset of configured conditions")
     parser.add_argument("--sweep", action="store_true",
                         help="exp 3: run the configured lambda sweep")
     parser.add_argument("--ner-lambda", type=float, default=None,
@@ -282,6 +283,13 @@ def main():
         run_dual_experiment(args.dataset, seeds, args.device, debug=args.debug,
                             skip_existing=args.skip_existing, conditions=args.conditions,
                             sweep=args.sweep, ner_lambda=args.ner_lambda)
+        return
+    if args.exp == "4":
+        from config.exp_4_continuous_spectral import CONFIG as EXP_4
+        from src.experiments.continuous_spectral import run_experiment_4
+        seeds = args.seeds or EXP_4["seeds"]
+        run_experiment_4(args.dataset, seeds, args.device, debug=args.debug,
+                         skip_existing=args.skip_existing, conditions=args.conditions)
         return
     seeds = args.seeds or MODEL_CFG["seeds"]
     run_experiment(args.exp, args.dataset, seeds, args.device, debug=args.debug,

@@ -235,6 +235,55 @@ class OneTransBlock(nn.Module):
             MixedFFN(input_dim, num_ns_token, dnn_activations, expansion_factor) for _ in range(num_layers)
         ])
 
+    def _forward_layer(self, s_tokens, ps_tokens, ns_tokens, mask, q_mask, layer_idx):
+        sequence_start = int(ps_tokens.size(1) * self.reduction_ratio)
+        if sequence_start > 0:
+            ps_tokens = ps_tokens[:, sequence_start:, :]
+            if q_mask is not None:
+                q_mask = q_mask[:, sequence_start:]
+        norm_s = self.norm1_layers[layer_idx](s_tokens)
+        norm_ps = self.norm1_layers[layer_idx](ps_tokens)
+        norm_ns = self.norm1_layers[layer_idx](ns_tokens)
+        delta_ps, delta_ns = self.mha_layers[layer_idx](norm_s, norm_ps, norm_ns,
+                                                        kv_mask=mask, q_mask=q_mask)
+        ps_tokens = ps_tokens + delta_ps
+        ns_tokens = ns_tokens + delta_ns
+        norm_ps = self.norm2_layers[layer_idx](ps_tokens)
+        norm_ns = self.norm2_layers[layer_idx](ns_tokens)
+        delta_ps, delta_ns = self.ffn_layers[layer_idx](norm_ps, norm_ns, q_mask)
+        ps_tokens = ps_tokens + delta_ps
+        ns_tokens = ns_tokens + delta_ns
+        return ps_tokens, ns_tokens, q_mask
+
+    def forward_prefix(self, s_tokens, ns_tokens, mask=None, end_layer=None):
+        """Run blocks [0, end_layer) and return the S/NS streams entering the next layer."""
+        if mask is not None:
+            s_tokens = s_tokens * mask.unsqueeze(-1).to(s_tokens.dtype)
+            q_mask = mask
+        else:
+            q_mask = None
+        ps_tokens = s_tokens
+        end_layer = self.num_layers - 1 if end_layer is None else end_layer
+        for i in range(end_layer):
+            ps_tokens, ns_tokens, q_mask = self._forward_layer(
+                s_tokens, ps_tokens, ns_tokens, mask, q_mask, i)
+            s_tokens = ps_tokens
+            mask = q_mask
+        return ps_tokens, ns_tokens, q_mask
+
+    def forward_one_layer(self, s_tokens, ns_tokens, mask=None, layer_idx=None):
+        """Run one shared block; used by Exp4 after inserting a spectral transform."""
+        if mask is not None:
+            s_tokens = s_tokens * mask.unsqueeze(-1).to(s_tokens.dtype)
+            q_mask = mask
+        else:
+            q_mask = None
+        ps_tokens = s_tokens
+        layer_idx = self.num_layers - 1 if layer_idx is None else layer_idx
+        ps_tokens, ns_tokens, q_mask = self._forward_layer(
+            s_tokens, ps_tokens, ns_tokens, mask, q_mask, layer_idx)
+        return ps_tokens, ns_tokens, q_mask
+
     def forward(self, s_tokens, ns_tokens, mask=None, return_states=False, s_transform=None):
         if mask is not None:
             s_tokens = s_tokens * mask.unsqueeze(-1).to(s_tokens.dtype)
@@ -245,30 +294,14 @@ class OneTransBlock(nn.Module):
         states: List[torch.Tensor] = []
         if return_states:
             states.append(ps_tokens)
+        if s_transform is not None and self.num_layers > 0:
+            ps_tokens = s_transform(ps_tokens)
+            s_tokens = ps_tokens
+            if return_states:
+                states.append(ps_tokens)
         for i in range(self.num_layers):
-            if i == self.num_layers - 1 and s_transform is not None:
-                ps_tokens = s_transform(ps_tokens)
-                s_tokens = ps_tokens
-                if return_states:
-                    states.append(ps_tokens)
-        for i in range(self.num_layers):
-            sequence_start = int(ps_tokens.size(1) * self.reduction_ratio)
-            if sequence_start > 0:
-                ps_tokens = ps_tokens[:, sequence_start:, :]
-                if q_mask is not None:
-                    q_mask = q_mask[:, sequence_start:]
-            norm_s = self.norm1_layers[i](s_tokens)
-            norm_ps = self.norm1_layers[i](ps_tokens)
-            norm_ns = self.norm1_layers[i](ns_tokens)
-            delta_ps, delta_ns = self.mha_layers[i](norm_s, norm_ps, norm_ns,
-                                                    kv_mask=mask, q_mask=q_mask)
-            ps_tokens = ps_tokens + delta_ps
-            ns_tokens = ns_tokens + delta_ns
-            norm_ps = self.norm2_layers[i](ps_tokens)
-            norm_ns = self.norm2_layers[i](ns_tokens)
-            delta_ps, delta_ns = self.ffn_layers[i](norm_ps, norm_ns, q_mask)
-            ps_tokens = ps_tokens + delta_ps
-            ns_tokens = ns_tokens + delta_ns
+            ps_tokens, ns_tokens, q_mask = self._forward_layer(
+                s_tokens, ps_tokens, ns_tokens, mask, q_mask, i)
             s_tokens = ps_tokens
             mask = q_mask
             if return_states:
@@ -358,10 +391,8 @@ class OneTransDiagnostic(nn.Module):
             (sparse if id(p) in sparse_ids else dense).append(p)
         return [{"params": dense, "lr": dense_lr}, {"params": sparse, "lr": sparse_lr}]
 
-    def forward(self, batch: Dict[str, torch.Tensor], field_mask: Optional[torch.Tensor] = None,
-                return_sequence_states: bool = False, gate_override: Optional[str] = None,
-                return_gate: bool = False, return_readout: bool = False,
-                return_last_state: bool = False):
+    def encode_inputs(self, batch: Dict[str, torch.Tensor],
+                      field_mask: Optional[torch.Tensor] = None):
         hist_item = batch["hist_item"]
         hist_action = batch["hist_action"]
         hist_mask = batch["hist_mask"].to(torch.float32)
@@ -380,6 +411,35 @@ class OneTransDiagnostic(nn.Module):
         feature_embeddings = field_emb * field_mask.repeat_interleave(self.embedding_dim).unsqueeze(0)
 
         ns_tokens = self.unified_tokenizer(feature_embeddings)
+        return s_tokens, ns_tokens, hist_mask
+
+    def encode_prefix(self, batch: Dict[str, torch.Tensor],
+                      field_mask: Optional[torch.Tensor] = None, end_layer: Optional[int] = None):
+        """Return S/NS streams entering the block after `end_layer` blocks."""
+        if self.residual_gate is not None:
+            raise ValueError("Exp4 prefix/one-layer API does not support the residual gate")
+        s_tokens, ns_tokens, hist_mask = self.encode_inputs(batch, field_mask)
+        end_layer = self.backbone.num_layers - 1 if end_layer is None else end_layer
+        s_pre, ns_pre, mask = self.backbone.forward_prefix(
+            s_tokens, ns_tokens, hist_mask, end_layer=end_layer)
+        return s_pre, ns_pre, mask
+
+    def final_layer(self, s_tokens: torch.Tensor, ns_tokens: torch.Tensor,
+                    mask: Optional[torch.Tensor], layer_idx: Optional[int] = None):
+        """Run one shared block plus the original CTR tower."""
+        s_final, ns_final, mask_out = self.backbone.forward_one_layer(
+            s_tokens, ns_tokens, mask, layer_idx=layer_idx)
+        readout = ns_final.flatten(start_dim=1)
+        logit = self.tower(readout).squeeze(-1)
+        logit = logit + 0.0 * s_final.sum()
+        return {"logit": logit, "pred": torch.sigmoid(logit), "readout": readout,
+                "s_final": s_final, "ns_final": ns_final, "hist_mask": mask_out}
+
+    def forward(self, batch: Dict[str, torch.Tensor], field_mask: Optional[torch.Tensor] = None,
+                return_sequence_states: bool = False, gate_override: Optional[str] = None,
+                return_gate: bool = False, return_readout: bool = False,
+                return_last_state: bool = False):
+        s_tokens, ns_tokens, hist_mask = self.encode_inputs(batch, field_mask)
 
         s_transform = None
         if self.residual_gate is not None:
