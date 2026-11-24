@@ -3,6 +3,7 @@
 Usage: python -m src.experiments.run_experiment --exp 1_1 --dataset 1k
        python -m src.experiments.run_experiment --exp 3 --dataset 1k
        python -m src.experiments.run_experiment --exp 4 --dataset 1k
+       python -m src.experiments.run_experiment --exp 4_2 --dataset 1k
 """
 
 import argparse
@@ -260,7 +261,7 @@ def run_experiment(exp: str, dataset_key: str, seeds, device_arg: str, debug: bo
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--exp", required=True,
-                        choices=["1_1", "1_2", "1_3", "1_4", "2_1", "2_2", "2_3", "3", "4"])
+                        choices=["1_1", "1_2", "1_3", "1_4", "2_1", "2_2", "2_3", "3", "4", "4_2"])
     parser.add_argument("--dataset", required=True, choices=["1k", "27k"])
     parser.add_argument("--seeds", nargs="+", type=int, default=None)
     parser.add_argument("--device", default="auto")
@@ -290,6 +291,13 @@ def main():
         seeds = args.seeds or EXP_4["seeds"]
         run_experiment_4(args.dataset, seeds, args.device, debug=args.debug,
                          skip_existing=args.skip_existing, conditions=args.conditions)
+        return
+    if args.exp == "4_2":
+        from config.exp_4_2_low_alpha import CONFIG as EXP_4_2
+        from src.experiments.continuous_spectral_low_alpha import run_experiment_4_2
+        seeds = args.seeds or EXP_4_2["seeds"]
+        run_experiment_4_2(args.dataset, seeds, args.device, debug=args.debug,
+                           skip_existing=args.skip_existing, conditions=args.conditions)
         return
     seeds = args.seeds or MODEL_CFG["seeds"]
     run_experiment(args.exp, args.dataset, seeds, args.device, debug=args.debug,

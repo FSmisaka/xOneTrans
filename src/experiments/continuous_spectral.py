@@ -102,8 +102,9 @@ def _validate_spectral_config() -> None:
         raise ValueError("all alpha nodes must be positive")
     if any(q < 0 for q in weights) or abs(sum(weights) - 1.0) > 1e-6:
         raise ValueError("quadrature weights must be non-negative and sum to 1")
-    if float(EXP_4["spectral"]["alpha_nodes"][0]) >= 1.0 or float(EXP_4["spectral"]["alpha_nodes"][-1]) <= 1.0:
-        raise ValueError("alpha nodes must bracket alpha=1")
+    if EXP_4["spectral"].get("bracket_alpha_one", True):
+        if alphas[0] >= 1.0 or alphas[-1] <= 1.0:
+            raise ValueError("alpha nodes must bracket alpha=1")
 
 
 def _baseline_path(seed: int) -> Path:
@@ -297,12 +298,15 @@ def _ensure_basis(model, datasets, device, run_dir: Path, signature: str,
                   rank: int, ddp: bool) -> Dict:
     basis_path = run_dir / "spectral_basis.pt"
     if ddp:
+        payload = None
         if rank == 0:
             run_dir.mkdir(parents=True, exist_ok=True)
-            payload = None
             if basis_path.exists():
-                cached = torch.load(basis_path, map_location="cpu")
-                if cached.get("metadata", {}).get("run_signature") == signature:
+                try:
+                    cached = torch.load(basis_path, map_location="cpu")
+                except Exception:
+                    cached = None
+                if cached and cached.get("metadata", {}).get("run_signature") == signature:
                     payload = cached
             if payload is None:
                 result = collect_calibration_tokens(
@@ -312,15 +316,25 @@ def _ensure_basis(model, datasets, device, run_dir: Path, signature: str,
                     EXP_4["calibration"]["seed"], EXP_4["calibration"]["batch_size"])
                 payload = build_basis_payload(result, dataset_key, seed, baseline_path,
                                               signature, debug)
-                torch.save(payload, basis_path)
-            torch.distributed.barrier()
-            return torch.load(basis_path, map_location="cpu")
-        torch.distributed.barrier()
-        return torch.load(basis_path, map_location="cpu")
+                tmp_path = run_dir / "spectral_basis.tmp"
+                torch.save(payload, tmp_path)
+                os.replace(tmp_path, basis_path)
+        # A barrier only synchronizes processes; it does not guarantee that a
+        # file written on a network filesystem is visible to other ranks.
+        # Broadcast the payload in memory so every rank uses the exact same basis.
+        objects = [payload]
+        torch.distributed.broadcast_object_list(objects, src=0, device=device)
+        payload = objects[0]
+        if payload is None:
+            raise RuntimeError("rank 0 failed to build the spectral basis")
+        return payload
     run_dir.mkdir(parents=True, exist_ok=True)
     if basis_path.exists():
-        cached = torch.load(basis_path, map_location="cpu")
-        if cached.get("metadata", {}).get("run_signature") == signature:
+        try:
+            cached = torch.load(basis_path, map_location="cpu")
+        except Exception:
+            cached = None
+        if cached and cached.get("metadata", {}).get("run_signature") == signature:
             return cached
     result = collect_calibration_tokens(
         model.base, datasets["train"], device,
@@ -329,7 +343,9 @@ def _ensure_basis(model, datasets, device, run_dir: Path, signature: str,
         EXP_4["calibration"]["seed"], EXP_4["calibration"]["batch_size"])
     payload = build_basis_payload(result, dataset_key, seed, baseline_path,
                                   signature, debug)
-    torch.save(payload, basis_path)
+    tmp_path = run_dir / "spectral_basis.tmp"
+    torch.save(payload, tmp_path)
+    os.replace(tmp_path, basis_path)
     return payload
 
 
@@ -764,31 +780,43 @@ def run_condition_4(condition: str, spec: Dict, dataset_key: str, seed: int,
     signature = _run_signature(seed, condition, spec, dataset_key, baseline_path, debug)
     run_dir = PATHS["results_root"] / "runs" / EXP_ID / condition / f"seed_{seed}"
     metrics_fp = run_dir / "metrics_test.json"
-    if skip_existing and metrics_fp.exists():
+    if ddp:
+        device = (torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
+                  if torch.cuda.is_available() else torch.device("cpu"))
+        if torch.cuda.is_available():
+            torch.cuda.set_device(device)
+    else:
+        device = resolve_device(device_arg)
+
+    skipped_payload = None
+    skip = False
+    if skip_existing and rank == 0 and metrics_fp.exists():
         try:
             payload = json.loads(metrics_fp.read_text())
         except Exception:
             payload = None
         if payload is not None and payload.get("run_signature") == signature:
-            if rank == 0:
-                print(f"[skip] {metrics_fp} already exists with matching signature")
-                per_seed = PATHS["metrics_root"] / EXP_ID / f"{condition}__{seed}.json"
-                if not per_seed.exists():
-                    combined = run_dir / "metrics_combined.json"
-                    if combined.exists():
-                        _write_json(per_seed, json.loads(combined.read_text()))
-                    else:
-                        valid_payload = json.loads((run_dir / "metrics_valid.json").read_text())
-                        test_payload = json.loads((run_dir / "metrics_test.json").read_text())
-                        _write_json(per_seed, _combine_split_payloads(valid_payload, test_payload))
-                return payload
-            return None
-
+            skip = True
+            skipped_payload = payload
+            print(f"[skip] {metrics_fp} already exists with matching signature")
+            per_seed = PATHS["metrics_root"] / EXP_ID / f"{condition}__{seed}.json"
+            if not per_seed.exists():
+                combined = run_dir / "metrics_combined.json"
+                if combined.exists():
+                    _write_json(per_seed, json.loads(combined.read_text()))
+                else:
+                    valid_payload = json.loads((run_dir / "metrics_valid.json").read_text())
+                    test_payload = json.loads((run_dir / "metrics_test.json").read_text())
+                    _write_json(per_seed, _combine_split_payloads(valid_payload, test_payload))
     if ddp:
-        device = (torch.device(f"cuda:{int(os.environ['LOCAL_RANK'])}")
-                  if torch.cuda.is_available() else torch.device("cpu"))
-    else:
-        device = resolve_device(device_arg)
+        # All ranks must make the same skip decision even if the shared file is
+        # not visible to every rank at the same instant.
+        decision = [skip]
+        torch.distributed.broadcast_object_list(decision, src=0, device=device)
+        skip = bool(decision[0])
+    if skip:
+        return skipped_payload if rank == 0 else None
+
     logger = (setup_logger(f"{EXP_ID}_{condition}_{seed}",
                            PATHS["logs_root"] / EXP_ID / condition / f"{seed}.log")
               if rank == 0 else None)
@@ -1196,7 +1224,8 @@ def summarize_exp_4() -> Optional[Dict]:
            "summary": summary, "paired_deltas": paired}
     metrics_dir = PATHS["metrics_root"] / EXP_ID
     _write_json(metrics_dir / "summary.json", out)
-    _write_json(PATHS["metrics_root"] / "summary_exp_4.json", out)
+    summary_alias = EXP_4.get("summary_alias", f"summary_{EXP_ID}")
+    _write_json(PATHS["metrics_root"] / f"{summary_alias}.json", out)
     rows = []
     for cond, entry in summary.items():
         for split in ("valid", "test"):

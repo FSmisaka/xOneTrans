@@ -12,6 +12,7 @@ QUAD_WEIGHTS = [1 / 18, 4 / 18, 2 / 18, 4 / 18, 2 / 18, 4 / 18, 1 / 18]
 
 CONFIG: Dict[str, Any] = {
     "experiment": "exp_4_continuous_spectral",
+    "summary_alias": "summary_exp_4",
     "seeds": [2026, 2027, 2028],
     "baseline_checkpoint": BASELINE_CKPT,
     "dataset": "1k",
@@ -27,6 +28,7 @@ CONFIG: Dict[str, Any] = {
         "alpha_nodes": ALPHA_NODES,
         "quadrature_weights": QUAD_WEIGHTS,
         "integration_variable": "log_alpha",
+        "bracket_alpha_one": True,
     },
     "model": {
         "trainable_last_n_layers": 1,

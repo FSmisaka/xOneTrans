@@ -42,7 +42,8 @@ def flatten(metrics: dict) -> dict:
     for arm, vals in (metrics.get("gate_intervention") or {}).items():
         row[f"intervention__{arm}__test_auc"] = vals.get("test_auc")
         row[f"intervention__{arm}__test_logloss"] = vals.get("test_logloss")
-    if metrics.get("experiment") != "exp_4_continuous_spectral":
+    exp4_names = ("exp_4_continuous_spectral", "exp_4_2")
+    if metrics.get("experiment") not in exp4_names:
         for layer, val in (metrics.get("ner") or {}).items():
             row[f"ner__{layer}"] = val
     for split in ("valid", "test"):
@@ -57,7 +58,7 @@ def flatten(metrics: dict) -> dict:
         row["mode"] = metrics["mode"]
         row["lambda_high"] = (metrics.get("variable") or {}).get("lambda_high")
         row["lambda_low"] = (metrics.get("variable") or {}).get("lambda_low")
-    if metrics.get("experiment") == "exp_4_continuous_spectral":
+    if metrics.get("experiment") in exp4_names:
         row["kind"] = metrics.get("kind")
         row["fusion"] = metrics.get("fusion")
         row["alpha"] = metrics.get("alpha")
