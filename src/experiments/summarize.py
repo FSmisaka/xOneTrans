@@ -42,7 +42,7 @@ def flatten(metrics: dict) -> dict:
     for arm, vals in (metrics.get("gate_intervention") or {}).items():
         row[f"intervention__{arm}__test_auc"] = vals.get("test_auc")
         row[f"intervention__{arm}__test_logloss"] = vals.get("test_logloss")
-    exp4_names = ("exp_4_continuous_spectral", "exp_4_2")
+    exp4_names = ("exp_4_continuous_spectral", "exp_4_2", "exp_4_3")
     if metrics.get("experiment") not in exp4_names:
         for layer, val in (metrics.get("ner") or {}).items():
             row[f"ner__{layer}"] = val

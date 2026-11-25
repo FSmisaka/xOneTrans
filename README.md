@@ -40,10 +40,13 @@ bash scripts/43_test_exp_4.sh                                 # 实验 4 谱变�
 bash scripts/44_run_exp_4_2_low_alpha.sh --dataset 1k         # 实验 4.2：alpha<=1 的低 alpha 网格与融合对比
 bash scripts/45_summarize_exp_4_2.sh                          # 重建实验 4.2 的 summary.json / summary.csv / paired_deltas.csv
 bash scripts/46_test_exp_4_2.sh                               # 实验 4.2 配置、wrapper 与 7-node 模型检查
+bash scripts/47_run_exp_4_3_continuous_representation.sh --dataset 1k  # 实验 4.3：连续 gate 密度 + Gauss-Legendre 积分 + 单次最后 Block
+bash scripts/48_summarize_exp_4_3.sh                          # 重建实验 4.3 的 summary.json / summary.csv / paired_deltas.csv
+bash scripts/49_test_exp_4_3.sh                               # 实验 4.3 配置、wrapper 与连续表示融合检查
 bash scripts/20_summarize_results.sh          # 汇总全部结果到 results/metrics/summary.csv
 ```
 
-实验 4 / 4.2 需要 Exp3 `single_baseline` 的最佳 checkpoint（默认路径见对应实验配置）；缺失时会明确报错，不会随机初始化基线。
+实验 4 / 4.2 / 4.3 需要 Exp3 `single_baseline` 的最佳 checkpoint（默认路径见对应实验配置）；缺失时会明确报错，不会随机初始化基线。
 
 正式实验将 `--dataset 1k` 替换为 `--dataset 27k`。所有脚本支持 `--seeds`、`--device` 透传，例如 `bash scripts/11_run_exp_1_1.sh --dataset 1k --seeds 2026`。
 
@@ -56,6 +59,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29500 -m 
 CUDA_VISIBLE_DEVICES=4,5 torchrun --nproc_per_node=2 --master_port=29501 -m src.experiments.run_experiment --exp 1_2 --dataset 1k  # 同时用另外 2 张卡跑实验 1.2（注意换 master_port）
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29502 -m src.experiments.run_experiment --exp 4 --dataset 1k  # 4 卡 DDP 跑实验 4
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29503 -m src.experiments.run_experiment --exp 4_2 --dataset 1k  # 4 卡 DDP 跑实验 4.2
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29504 -m src.experiments.run_experiment --exp 4_3 --dataset 1k  # 4 卡 DDP 跑实验 4.3
 ```
 
 有效 batch（config/onetrans.py 的 batch_size=2048）在任意卡数下保持不变：micro batch = batch_size ÷ 累积步数 ÷ 卡数，全局梯度一致。
@@ -72,4 +76,6 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --nproc_per_node=4 --master_port=29503 -m 
 - 实验 4 多 seed 汇总：`results/metrics/exp_4_continuous_spectral/{summary.json,summary.csv,paired_deltas.csv}` 与 `results/metrics/summary_exp_4.json`
 - 实验 4.2 每次运行：`results/runs/exp_4_2/<condition>/seed_<seed>/`（文件结构同实验 4）
 - 实验 4.2 多 seed 汇总：`results/metrics/exp_4_2/{summary.json,summary.csv,paired_deltas.csv}` 与 `results/metrics/summary_exp_4_2.json`
+- 实验 4.3 每次运行：`results/runs/exp_4_3/<condition>/seed_<seed>/`（文件结构同实验 4）
+- 实验 4.3 多 seed 汇总：`results/metrics/exp_4_3/{summary.json,summary.csv,paired_deltas.csv}` 与 `results/metrics/summary_exp_4_3.json`
 - 数据侧元数据（字段顺序、质量置换映射、字段重要性、UniRank 参考）：`data/metadata/`（属于实验数据定义，随数据而非模型输出）

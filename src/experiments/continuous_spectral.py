@@ -384,21 +384,23 @@ def collect_ner_tokens(model, dataset, diag, batch_size: int, device) -> Dict:
         flat = pre.view(-1, pre.shape[-1])[ranks_l * pre.shape[1] + poss_l]
         if flat.shape[0]:
             chunks_pre.append(flat.cpu())
-        s_alpha = out["s_alpha"].float()
-        if chunks_alpha is None:
-            chunks_alpha = [[] for _ in range(s_alpha.shape[1])]
-            chunks_final = [[] for _ in range(s_alpha.shape[1])]
-        for k in range(s_alpha.shape[1]):
-            state = s_alpha[:, k]
-            flat = state.reshape(-1, state.shape[-1])[ranks_l * state.shape[1] + poss_l]
-            if flat.shape[0]:
-                chunks_alpha[k].append(flat.cpu())
-            if "s_final" in out:
-                state_final = out["s_final"][:, k].float()
-                flat_final = state_final.reshape(
-                    -1, state_final.shape[-1])[ranks_l * state_final.shape[1] + poss_l]
-                if flat_final.shape[0]:
-                    chunks_final[k].append(flat_final.cpu())
+        s_alpha = out.get("s_alpha")
+        if s_alpha is not None:
+            s_alpha = s_alpha.float()
+            if chunks_alpha is None:
+                chunks_alpha = [[] for _ in range(s_alpha.shape[1])]
+                chunks_final = [[] for _ in range(s_alpha.shape[1])]
+            for k in range(s_alpha.shape[1]):
+                state = s_alpha[:, k]
+                flat = state.reshape(-1, state.shape[-1])[ranks_l * state.shape[1] + poss_l]
+                if flat.shape[0]:
+                    chunks_alpha[k].append(flat.cpu())
+                if "s_final" in out:
+                    state_final = out["s_final"][:, k].float()
+                    flat_final = state_final.reshape(
+                        -1, state_final.shape[-1])[ranks_l * state_final.shape[1] + poss_l]
+                    if flat_final.shape[0]:
+                        chunks_final[k].append(flat_final.cpu())
         if "s_mix" in out:
             s_mix = out["s_mix"].float()
             flat_mix = s_mix.reshape(-1, s_mix.shape[-1])[ranks_l * s_mix.shape[1] + poss_l]
@@ -1050,10 +1052,12 @@ def _aggregate_ner(rs: List[Dict]) -> Dict:
     global_nodes = first.get("spectral_alpha_nodes") or EXP4_ALPHAS
     ref = [_mean_std([r["reference_ner"][i] for r in rs]) for i in range(len(global_nodes))]
     cal = [_mean_std([r["calibration_ner"][i] for r in rs]) for i in range(len(global_nodes))]
+    pre_len = len(first["ner"]["pre_final"]["valid"]) if first["ner"].get("pre_final") else 0
+    post_len = len(first["ner"]["post_final"]["valid"]) if first["ner"].get("post_final") else 0
     pre = {split: [_mean_std([r["ner"]["pre_final"][split][i] for r in rs])
-                   for i in range(len(active))] for split in ("valid", "test")}
+                   for i in range(pre_len)] for split in ("valid", "test")}
     post = {split: [_mean_std([r["ner"]["post_final"][split][i] for r in rs])
-                    for i in range(len(active))] for split in ("valid", "test")}
+                    for i in range(post_len)] for split in ("valid", "test")}
     mix = {}
     if any(r["ner"].get("representation_mix") for r in rs):
         for key in ("valid_pre", "valid_post", "test_pre", "test_post"):
@@ -1164,11 +1168,17 @@ def _paired_deltas(runs: List[Dict], conditions: List[str]) -> List[Dict]:
                             (r.get("node_metrics", {}).get(s) or {}).get(a, {}).get(m)),
                         seeds)
             active = cond_runs[0]["ner"]["alpha_nodes"]
-            for alpha_idx, alpha in enumerate(active):
+            n_pre = len(cond_runs[0]["ner"].get("pre_final", {}).get("valid", []))
+            n_post = len(cond_runs[0]["ner"].get("post_final", {}).get("valid", []))
+            for alpha_idx in range(n_pre):
+                alpha = active[alpha_idx] if alpha_idx < len(active) else str(alpha_idx)
                 for scope, key in (("valid", "valid"), ("test", "test")):
                     add(cond, baseline, scope, f"ner.pre_final.{alpha}",
                         lambda r, i=alpha_idx, s=key: r["ner"]["pre_final"][s][i],
                         lambda r, s=key: r["ner"]["pre_final"][s][0], seeds)
+            for alpha_idx in range(n_post):
+                alpha = active[alpha_idx] if alpha_idx < len(active) else str(alpha_idx)
+                for scope, key in (("valid", "valid"), ("test", "test")):
                     add(cond, baseline, scope, f"ner.post_final.{alpha}",
                         lambda r, i=alpha_idx, s=key: r["ner"]["post_final"][s][i],
                         lambda r, s=key: r["ner"]["post_final"][s][0], seeds)

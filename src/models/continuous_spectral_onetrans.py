@@ -7,8 +7,10 @@ block once per alpha; the representation mode fuses transformed S streams and
 runs the final block once.
 """
 
+import math
 from typing import Dict, List, Optional
 
+import numpy as np
 import torch
 import torch.nn.functional as F
 from torch import nn
@@ -65,6 +67,11 @@ class ContinuousSpectralOneTrans(nn.Module):
         self.register_buffer("sigma_alphas", torch.zeros(0, self.token_dim))
         self.register_buffer("active_alphas", torch.zeros(0))
         self.register_buffer("active_quad_weights", torch.zeros(0))
+        self.register_buffer("cont_V", torch.zeros(self.token_dim, self.token_dim))
+        self.register_buffer("cont_r", torch.zeros(0, self.token_dim))
+        self.register_buffer("cont_alphas", torch.zeros(0))
+        self.register_buffer("cont_quad_weights", torch.zeros(0))
+        self.continuous_cfg = spectral_cfg.get("continuous")
         self.basis_metadata: Dict = {}
         self.baseline_checkpoint: Optional[str] = None
 
@@ -81,10 +88,26 @@ class ContinuousSpectralOneTrans(nn.Module):
                                          hidden_activations=model_cfg["dnn_activations"],
                                          output_dim=1, dropout_rates=self.gate_dropout)
             _zero_init_last(self.context_gate)
-        if self.kind == "representation_mix" and self.fusion != "contextual":
-            raise ValueError("representation_mix requires contextual fusion")
+        if self.kind in ("representation_mix", "continuous_representation_mix") \
+                and self.fusion != "contextual":
+            raise ValueError(f"{self.kind} requires contextual fusion")
         if self.kind == "single" and self.fusion is not None:
             raise ValueError("single-alpha conditions do not use a fusion gate")
+        if self.kind == "continuous_representation_mix":
+            if not self.continuous_cfg:
+                raise ValueError("continuous_representation_mix requires a spectral.continuous config")
+            q = int(self.continuous_cfg["num_nodes"])
+            alpha_min = float(self.continuous_cfg["alpha_min"])
+            alpha_max = float(self.continuous_cfg["alpha_max"])
+            if q < 2 or alpha_min <= 0 or alpha_max <= alpha_min:
+                raise ValueError("invalid continuous alpha integration config")
+            t_min, t_max = math.log(alpha_min), math.log(alpha_max)
+            x, w = np.polynomial.legendre.leggauss(q)
+            t = 0.5 * (t_max - t_min) * x + 0.5 * (t_max + t_min)
+            weights = w * 0.5 * (t_max - t_min)
+            weights = weights / weights.sum()
+            self.cont_alphas = torch.tensor(np.exp(t), dtype=torch.float32)
+            self.cont_quad_weights = torch.tensor(weights, dtype=torch.float32)
 
     def load_baseline(self, checkpoint_path: str) -> None:
         ckpt = torch.load(checkpoint_path, map_location="cpu")
@@ -95,6 +118,30 @@ class ContinuousSpectralOneTrans(nn.Module):
     def set_spectral_basis(self, basis: Dict, transforms: List[Dict],
                            alpha_nodes: List[float], quad_weights: List[float]) -> None:
         self.mu_ref = basis["mu_ref"].float().to(self.mu_ref.device)
+        if self.kind == "continuous_representation_mix":
+            sigma = basis["sigma"].float().to(self.mu_ref.device)
+            v = basis["V"].float().to(self.mu_ref.device)
+            tol = float(basis.get("metadata", {}).get("rank_relative_tolerance", 1e-6))
+            if float(sigma.max()) <= 0.0:
+                raise ValueError("cannot build continuous basis from a zero spectrum")
+            significant = sigma > sigma.max() * tol
+            if not significant.any():
+                raise ValueError("continuous basis has no significant spectral directions")
+            log_sigma = torch.log(sigma[significant])
+            alphas = self.cont_alphas.to(device=self.mu_ref.device, dtype=torch.float32)
+            scores = alphas.unsqueeze(1) * log_sigma.unsqueeze(0)
+            probabilities = torch.softmax(scores, dim=1)
+            sigma_alpha = sigma.sum() * probabilities
+            ratios = torch.zeros(alphas.numel(), sigma.numel(),
+                                 device=self.mu_ref.device, dtype=torch.float32)
+            ratios[:, significant] = sigma_alpha / sigma[significant]
+            self.cont_V = v
+            self.cont_r = ratios
+            self.active_alphas = alphas
+            self.active_quad_weights = self.cont_quad_weights.to(
+                device=self.mu_ref.device, dtype=torch.float32)
+            self.basis_metadata = dict(basis.get("metadata", {}))
+            return
         if self.kind == "single":
             idx = int(min(range(len(alpha_nodes)),
                           key=lambda i: abs(float(alpha_nodes[i]) - self.fixed_alpha)))
@@ -192,6 +239,30 @@ class ContinuousSpectralOneTrans(nn.Module):
         with torch.no_grad():
             s_pre, ns_pre, mask = self.base.encode_prefix(batch, field_mask)
         batch_size = s_pre.shape[0]
+
+        if self.kind == "continuous_representation_mix":
+            context = self._context(s_pre, ns_pre, mask)
+            weights = self._mixture_weights(context, batch_size)
+            r_bar = torch.matmul(weights, self.cont_r)
+            centered = s_pre - self.mu_ref
+            z = torch.matmul(centered, self.cont_V) * r_bar.unsqueeze(1)
+            s_mix = self.mu_ref + torch.matmul(z, self.cont_V.transpose(0, 1))
+            s_mix = s_mix * mask.unsqueeze(-1).to(s_mix.dtype)
+            final = self._final(s_mix, ns_pre, mask)
+            logit = final["logit"]
+            prob = torch.sigmoid(logit)
+            out = {
+                "logit": logit, "pred": prob, "mix_logit": logit, "mix_prob": prob,
+                "weights": weights, "alpha_nodes": self.active_alphas,
+                "quad_weights": self.active_quad_weights, "fusion": self.fusion,
+                "hist_mask": mask, "final_mask": final["hist_mask"],
+            }
+            if return_states:
+                out["s_pre"] = s_pre
+                out["s_mix"] = s_mix
+                out["s_final_mix"] = final["s_final"]
+            return out
+
         s_alphas = self._transformed_s(s_pre, mask)
 
         if self.kind == "single":
